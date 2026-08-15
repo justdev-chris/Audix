@@ -44,7 +44,7 @@ namespace Audix.Services
             if (outputDevice == null) return;
             if (IsPaused)
             {
-                outputDevice.Resume();
+                outputDevice.Play(); // Fixed: Resume doesn't exist, use Play()
                 IsPaused = false;
             }
             else
