@@ -36,7 +36,6 @@ namespace Audix
             lyricsService = new LyricsService();
             artworkService = new ArtworkService();
 
-            audio.PlaybackStopped += (s, e) => playlist.Next();
             playlist.TrackChanged += (s, track) => LoadTrack(track);
 
             InitializeComponent();
@@ -256,7 +255,6 @@ namespace Audix
             Stop();
             playlist.Clear();
             playlistBox.Items.Clear();
-            audio.CurrentFile = "";
         }
 
         private void PlaySelected()
@@ -265,15 +263,35 @@ namespace Audix
                 playlist.MoveTo(playlistBox.SelectedIndex);
         }
 
+        private void OnPlaybackStopped(object? sender, EventArgs e)
+        {
+            if (this.InvokeRequired)
+            {
+                this.Invoke((MethodInvoker)(() => OnPlaybackStopped(sender, e)));
+                return;
+            }
+
+            // Only advance if we actually finished playing (position > 0 means we played something)
+            if (audio.Position > 0)
+            {
+                playlist.Next();
+            }
+        }
+
         private void LoadTrack(string file)
         {
             Stop();
-            
+            audio.PlaybackStopped -= OnPlaybackStopped;
+
+            System.Threading.Thread.Sleep(50);
+
             if (!audio.Load(file))
             {
                 statusLabel.Text = "Error loading file";
                 return;
             }
+
+            audio.PlaybackStopped += OnPlaybackStopped;
 
             currentLyrics = lyricsService.Extract(file);
             currentLyricIndex = -1;
@@ -296,10 +314,14 @@ namespace Audix
             if (!audio.IsPlaying)
             {
                 if (!string.IsNullOrEmpty(audio.CurrentFile))
+                {
                     audio.Play();
+                    playBtn.Text = "⏸ Pause";
+                }
                 else if (playlist.Count > 0)
+                {
                     playlist.MoveTo(0);
-                playBtn.Text = "⏸ Pause";
+                }
                 return;
             }
 
@@ -317,6 +339,7 @@ namespace Audix
 
         private void Stop()
         {
+            audio.PlaybackStopped -= OnPlaybackStopped;
             audio.Stop();
             updateTimer.Stop();
             playBtn.Text = "▶ Play";
