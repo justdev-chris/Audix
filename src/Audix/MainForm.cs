@@ -79,8 +79,8 @@ namespace Audix
 
             playBtn = CreateButton("▶ Play", (s, e) => TogglePlay());
             stopBtn = CreateButton("⏹ Stop", (s, e) => Stop());
-            prevBtn = CreateButton("⏮ Prev", (s, e) => playlist.Previous);
-            nextBtn = CreateButton("⏭ Next", (s, e) => playlist.Next);
+            prevBtn = CreateButton("⏮ Prev", (s, e) => playlist.Previous());
+            nextBtn = CreateButton("⏭ Next", (s, e) => playlist.Next());
             lyricsToggleBtn = CreateButton("📝 Lyrics", (s, e) => ToggleLyrics());
             artToggleBtn = CreateButton("🖼️ Art", (s, e) => ToggleArt());
 
