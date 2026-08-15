@@ -3,41 +3,46 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.IO;
 using System.Linq;
-using System.Text.RegularExpressions;
 using System.Windows.Forms;
-using NAudio.Wave;
-using TagLib;
-using Newtonsoft.Json;
+using Audix.Models;
+using Audix.Services;
+using Audix.Utils;
 
 namespace Audix
 {
     public partial class MainForm : Form
     {
-        private WaveOutEvent outputDevice;
-        private AudioFileReader audioFile;
-        private List<string> playlist = new List<string>();
-        private int playlistIndex = -1;
-        private List<LyricLine> lyrics = new List<LyricLine>();
+        private readonly AudioEngine audio;
+        private readonly PlaylistManager playlist;
+        private readonly LyricsService lyricsService;
+        private readonly ArtworkService artworkService;
+        private readonly Timer updateTimer;
+
+        private List<LyricLine> currentLyrics = new List<LyricLine>();
         private int currentLyricIndex = -1;
-        private Timer updateTimer;
-        private string currentFile = "";
-        private bool isPlaying = false;
-        private bool isPaused = false;
-        private int duration = 0;
+        private bool showLyrics = true;
+        private bool showArt = true;
 
         private Button playBtn, stopBtn, nextBtn, prevBtn, openBtn, folderBtn, clearBtn, lyricsToggleBtn, artToggleBtn;
         private TrackBar progressBar;
         private Label timeLabel, currentLyricLabel, nextLyricLabel, statusLabel;
         private ListBox playlistBox;
         private PictureBox artBox;
-        private bool showLyrics = true;
-        private bool showArt = true;
 
         public MainForm()
         {
+            audio = new AudioEngine();
+            playlist = new PlaylistManager();
+            lyricsService = new LyricsService();
+            artworkService = new ArtworkService();
+
+            audio.PlaybackStopped += (s, e) => playlist.Next();
+            playlist.TrackChanged += (s, track) => LoadTrack(track);
+
             InitializeComponent();
             SetupUI();
             LoadSettings();
+
             updateTimer = new Timer();
             updateTimer.Interval = 100;
             updateTimer.Tick += UpdateTimer_Tick;
@@ -74,8 +79,8 @@ namespace Audix
 
             playBtn = CreateButton("▶ Play", (s, e) => TogglePlay());
             stopBtn = CreateButton("⏹ Stop", (s, e) => Stop());
-            prevBtn = CreateButton("⏮ Prev", (s, e) => PrevTrack());
-            nextBtn = CreateButton("⏭ Next", (s, e) => NextTrack());
+            prevBtn = CreateButton("⏮ Prev", (s, e) => playlist.Previous);
+            nextBtn = CreateButton("⏭ Next", (s, e) => playlist.Next);
             lyricsToggleBtn = CreateButton("📝 Lyrics", (s, e) => ToggleLyrics());
             artToggleBtn = CreateButton("🖼️ Art", (s, e) => ToggleArt());
 
@@ -84,7 +89,7 @@ namespace Audix
 
             var progressPanel = new Panel { Dock = DockStyle.Top, Height = 50, BackColor = Color.FromArgb(26, 26, 46) };
             progressBar = new TrackBar { Dock = DockStyle.Fill, Minimum = 0, Maximum = 100, Value = 0 };
-            progressBar.Scroll += (s, e) => Seek();
+            progressBar.Scroll += (s, e) => audio.Seek((int)(progressBar.Value / 100.0 * audio.Duration));
             progressPanel.Controls.Add(progressBar);
 
             timeLabel = new Label
@@ -215,8 +220,8 @@ namespace Audix
                 {
                     foreach (var file in dialog.FileNames)
                         AddToPlaylist(file);
-                    if (playlist.Count > 0 && string.IsNullOrEmpty(currentFile))
-                        LoadTrack(playlist[0]);
+                    if (playlist.Count > 0 && string.IsNullOrEmpty(audio.CurrentFile))
+                        playlist.MoveTo(0);
                 }
             }
         }
@@ -234,19 +239,16 @@ namespace Audix
                         if (extensions.Contains(Path.GetExtension(file).ToLower()))
                             AddToPlaylist(file);
                     }
-                    if (playlist.Count > 0 && string.IsNullOrEmpty(currentFile))
-                        LoadTrack(playlist[0]);
+                    if (playlist.Count > 0 && string.IsNullOrEmpty(audio.CurrentFile))
+                        playlist.MoveTo(0);
                 }
             }
         }
 
         private void AddToPlaylist(string file)
         {
-            if (!playlist.Contains(file))
-            {
-                playlist.Add(file);
-                playlistBox.Items.Add(Path.GetFileName(file));
-            }
+            playlist.Add(file);
+            playlistBox.Items.Add(Path.GetFileName(file));
         }
 
         private void ClearPlaylist()
@@ -254,84 +256,69 @@ namespace Audix
             Stop();
             playlist.Clear();
             playlistBox.Items.Clear();
-            currentFile = "";
+            audio.CurrentFile = "";
         }
 
         private void PlaySelected()
         {
             if (playlistBox.SelectedIndex >= 0)
-            {
-                playlistIndex = playlistBox.SelectedIndex;
-                LoadTrack(playlist[playlistIndex]);
-            }
+                playlist.MoveTo(playlistBox.SelectedIndex);
         }
 
         private void LoadTrack(string file)
         {
             Stop();
-            currentFile = file;
-
-            try
+            
+            if (!audio.Load(file))
             {
-                audioFile = new AudioFileReader(file);
-                outputDevice = new WaveOutEvent();
-                outputDevice.Init(audioFile);
-                outputDevice.PlaybackStopped += (s, e) =>
-                {
-                    if (isPlaying && !isPaused)
-                        this.Invoke((MethodInvoker)NextTrack);
-                };
-
-                duration = (int)audioFile.TotalTime.TotalMilliseconds;
-                isPlaying = true;
-                isPaused = false;
-                playBtn.Text = "⏸ Pause";
-                updateTimer.Start();
-
-                ExtractLyrics(file);
-                ExtractArt(file);
-                statusLabel.Text = $"Playing: {Path.GetFileName(file)}";
-                playlistIndex = playlist.IndexOf(file);
-                playlistBox.SelectedIndex = playlistIndex;
+                statusLabel.Text = "Error loading file";
+                return;
             }
-            catch (Exception ex)
-            {
-                statusLabel.Text = $"Error: {ex.Message}";
-            }
+
+            currentLyrics = lyricsService.Extract(file);
+            currentLyricIndex = -1;
+            currentLyricLabel.Text = currentLyrics.Count > 0 ? currentLyrics[0].Text : "No lyrics";
+            nextLyricLabel.Text = "";
+
+            var art = artworkService.Extract(file);
+            artBox.Image = art ?? null;
+
+            audio.Play();
+            playBtn.Text = "⏸ Pause";
+            updateTimer.Start();
+
+            statusLabel.Text = $"Playing: {Path.GetFileName(file)}";
+            playlistBox.SelectedIndex = playlist.IndexOf(file);
         }
 
         private void TogglePlay()
         {
-            if (!isPlaying)
+            if (!audio.IsPlaying)
             {
-                if (!string.IsNullOrEmpty(currentFile))
-                    LoadTrack(currentFile);
+                if (!string.IsNullOrEmpty(audio.CurrentFile))
+                    audio.Play();
+                else if (playlist.Count > 0)
+                    playlist.MoveTo(0);
+                playBtn.Text = "⏸ Pause";
                 return;
             }
 
-            isPaused = !isPaused;
-            if (isPaused)
+            if (audio.IsPaused)
             {
-                outputDevice.Pause();
-                playBtn.Text = "▶ Play";
+                audio.Play();
+                playBtn.Text = "⏸ Pause";
             }
             else
             {
-                outputDevice.Play();
-                playBtn.Text = "⏸ Pause";
+                audio.Pause();
+                playBtn.Text = "▶ Play";
             }
         }
 
         private void Stop()
         {
-            isPlaying = false;
-            isPaused = false;
+            audio.Stop();
             updateTimer.Stop();
-            outputDevice?.Stop();
-            outputDevice?.Dispose();
-            outputDevice = null;
-            audioFile?.Dispose();
-            audioFile = null;
             playBtn.Text = "▶ Play";
             progressBar.Value = 0;
             timeLabel.Text = "00:00 / 00:00";
@@ -339,116 +326,31 @@ namespace Audix
             nextLyricLabel.Text = "";
         }
 
-        private void NextTrack()
-        {
-            if (playlist.Count == 0) return;
-            playlistIndex = (playlistIndex + 1) % playlist.Count;
-            LoadTrack(playlist[playlistIndex]);
-        }
-
-        private void PrevTrack()
-        {
-            if (playlist.Count == 0) return;
-            playlistIndex = (playlistIndex - 1 + playlist.Count) % playlist.Count;
-            LoadTrack(playlist[playlistIndex]);
-        }
-
-        private void Seek()
-        {
-            if (audioFile != null && duration > 0)
-            {
-                var pos = (int)(progressBar.Value / 100.0 * duration);
-                audioFile.CurrentTime = TimeSpan.FromMilliseconds(pos);
-            }
-        }
-
         private void UpdateTimer_Tick(object sender, EventArgs e)
         {
-            if (!isPlaying || isPaused || audioFile == null) return;
+            if (!audio.IsPlaying || audio.IsPaused) return;
 
-            var pos = (int)audioFile.CurrentTime.TotalMilliseconds;
+            audio.UpdatePosition();
+            var pos = audio.Position;
+            var duration = audio.Duration;
+
             if (duration > 0)
             {
                 progressBar.Value = (int)(pos / (double)duration * 100);
-                timeLabel.Text = $"{FormatTime(pos)} / {FormatTime(duration)}";
+                timeLabel.Text = $"{TimeFormatter.Format(pos)} / {TimeFormatter.Format(duration)}";
             }
 
             UpdateLyrics(pos);
         }
 
-        private string FormatTime(int ms)
-        {
-            var seconds = ms / 1000;
-            return $"{seconds / 60:00}:{seconds % 60:00}";
-        }
-
-        private void ExtractLyrics(string file)
-        {
-            lyrics.Clear();
-            currentLyricIndex = -1;
-
-            var lrcPath = Path.ChangeExtension(file, ".lrc");
-            if (File.Exists(lrcPath))
-            {
-                try
-                {
-                    var lines = File.ReadAllLines(lrcPath);
-                    foreach (var line in lines)
-                    {
-                        var match = Regex.Match(line.Trim(), @"^\[(\d+):(\d+\.?\d*)\]\s*(.+)$");
-                        if (match.Success)
-                        {
-                            var minutes = int.Parse(match.Groups[1].Value);
-                            var seconds = double.Parse(match.Groups[2].Value);
-                            var timeMs = (int)((minutes * 60 + seconds) * 1000);
-                            var text = match.Groups[3].Value.Trim();
-                            if (!string.IsNullOrEmpty(text))
-                                lyrics.Add(new LyricLine { TimeMs = timeMs, Text = text });
-                        }
-                    }
-                    lyrics = lyrics.OrderBy(l => l.TimeMs).ToList();
-                    if (lyrics.Count > 0)
-                    {
-                        statusLabel.Text += $" | {lyrics.Count} LRC lyrics";
-                        return;
-                    }
-                }
-                catch { }
-            }
-
-            try
-            {
-                var tagFile = TagLib.File.Create(file);
-                if (!string.IsNullOrEmpty(tagFile.Tag.Lyrics))
-                {
-                    var lines = tagFile.Tag.Lyrics.Split('\n');
-                    for (int i = 0; i < lines.Length; i++)
-                    {
-                        var text = lines[i].Trim();
-                        if (!string.IsNullOrEmpty(text))
-                            lyrics.Add(new LyricLine { TimeMs = i * 3000, Text = text });
-                    }
-                    if (lyrics.Count > 0)
-                    {
-                        statusLabel.Text += $" | {lyrics.Count} embedded lyrics";
-                        return;
-                    }
-                }
-            }
-            catch { }
-
-            currentLyricLabel.Text = "No lyrics";
-            nextLyricLabel.Text = "";
-        }
-
         private void UpdateLyrics(int currentTime)
         {
-            if (lyrics.Count == 0 || !showLyrics) return;
+            if (currentLyrics.Count == 0 || !showLyrics) return;
 
             var bestIdx = -1;
-            for (int i = 0; i < lyrics.Count; i++)
+            for (int i = 0; i < currentLyrics.Count; i++)
             {
-                if (lyrics[i].TimeMs <= currentTime)
+                if (currentLyrics[i].TimeMs <= currentTime)
                     bestIdx = i;
                 else
                     break;
@@ -459,29 +361,10 @@ namespace Audix
                 currentLyricIndex = bestIdx;
                 if (bestIdx >= 0)
                 {
-                    currentLyricLabel.Text = lyrics[bestIdx].Text;
-                    nextLyricLabel.Text = bestIdx + 1 < lyrics.Count ? lyrics[bestIdx + 1].Text : "";
+                    currentLyricLabel.Text = currentLyrics[bestIdx].Text;
+                    nextLyricLabel.Text = bestIdx + 1 < currentLyrics.Count ? currentLyrics[bestIdx + 1].Text : "";
                 }
             }
-        }
-
-        private void ExtractArt(string file)
-        {
-            try
-            {
-                var tagFile = TagLib.File.Create(file);
-                if (tagFile.Tag.Pictures != null && tagFile.Tag.Pictures.Length > 0)
-                {
-                    var picture = tagFile.Tag.Pictures[0];
-                    using (var ms = new MemoryStream(picture.Data.Data))
-                    {
-                        artBox.Image = Image.FromStream(ms);
-                        return;
-                    }
-                }
-            }
-            catch { }
-            artBox.Image = null;
         }
 
         private void ToggleLyrics()
@@ -495,7 +378,7 @@ namespace Audix
             }
             else
             {
-                UpdateLyrics((int)(audioFile?.CurrentTime.TotalMilliseconds ?? 0));
+                UpdateLyrics(audio.Position);
             }
         }
 
@@ -514,7 +397,7 @@ namespace Audix
                 if (File.Exists(settingsPath))
                 {
                     var json = File.ReadAllText(settingsPath);
-                    var settings = JsonConvert.DeserializeObject<Settings>(json);
+                    var settings = Newtonsoft.Json.JsonConvert.DeserializeObject<Settings>(json);
                     if (settings != null)
                     {
                         showLyrics = settings.ShowLyrics;
@@ -527,7 +410,7 @@ namespace Audix
                                     AddToPlaylist(file);
                             }
                             if (playlist.Count > 0)
-                                LoadTrack(playlist[0]);
+                                playlist.MoveTo(0);
                         }
                     }
                 }
@@ -546,24 +429,11 @@ namespace Audix
                 {
                     ShowLyrics = showLyrics,
                     ShowArt = showArt,
-                    LastPlaylist = playlist
+                    LastPlaylist = playlist.Tracks.ToList()
                 };
-                File.WriteAllText(settingsPath, JsonConvert.SerializeObject(settings, Formatting.Indented));
+                System.IO.File.WriteAllText(settingsPath, Newtonsoft.Json.JsonConvert.SerializeObject(settings, Newtonsoft.Json.Formatting.Indented));
             }
             catch { }
         }
-    }
-
-    public class LyricLine
-    {
-        public int TimeMs { get; set; }
-        public string Text { get; set; } = string.Empty;
-    }
-
-    public class Settings
-    {
-        public bool ShowLyrics { get; set; } = true;
-        public bool ShowArt { get; set; } = true;
-        public List<string> LastPlaylist { get; set; } = new List<string>();
     }
 }
